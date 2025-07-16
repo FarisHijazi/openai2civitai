@@ -6,3 +6,5 @@ python-multipart>=0.0.6
 httpx>=0.25.0
 requests>=2.31.0
 joblib
+pytest
+requests-mock

@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  civitai-proxy:
+    build: .
+    container_name: civitai-openai-proxy
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      - CIVITAI_API_TOKEN=${CIVITAI_API_TOKEN}
+      - CIVITAI_DEFAULT_MODEL=${CIVITAI_DEFAULT_MODEL:-urn:air:sdxl:checkpoint:civitai:257749@290640}
+      - HOST=0.0.0.0
+      - PORT=8000
+      - MAX_POLL_ATTEMPTS=${MAX_POLL_ATTEMPTS:-150}
+      - POLL_INTERVAL=${POLL_INTERVAL:-2}
+    env_file:
+      - .env
+    volumes:
+      # Mount for development (optional - remove for production)
+      - .:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  default:
+    name: civitai-proxy-network

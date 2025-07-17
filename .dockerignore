@@ -1,65 +1,22 @@
-# Git files
+# Git
 .git
 .gitignore
 
-# Python cache files
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# Docker
+.dockerignore
+Dockerfile
+docker-compose.yml
 
-# Virtual environments
-venv/
-env/
-ENV/
-
-# IDE files
+# IDEs and editors
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
 
-# OS files
-.DS_Store
-Thumbs.db
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
 
-# Logs
-*.log
-logs/
-
-# Development files
-debug_*.py
-quick_test.py
-test_*.py
-example_*.py
-
-# Documentation
-*.md
-prompt.md
-
-# Large HTML files
-*.html
-
-# Local environment files (will be handled by env_file in compose)
-.env.local
-.env.development
-
-# Claude AI files
-.claude/ 
+# Other
+README.md 

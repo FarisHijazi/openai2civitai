@@ -1,14 +1,46 @@
 import os
+
 import backoff
 import openai
-from openai import OpenAI
 from joblib import Memory
+from loguru import logger
+from openai import OpenAI
+import prompt_parser
+import sys
 
 memory = Memory(location="./cache", verbose=0)
 
 PROMPT_REVISER_OPENAI_API_KEY = os.getenv("PROMPT_REVISER_OPENAI_API_KEY")
-PROMPT_REVISER_OPENAI_BASE_URL = os.getenv("PROMPT_REVISER_OPENAI_BASE_URL", "https://api.openai.com/v1")
+PROMPT_REVISER_OPENAI_BASE_URL = os.getenv(
+    "PROMPT_REVISER_OPENAI_BASE_URL", "https://api.openai.com/v1"
+)
 PROMPT_REVISER_MODEL = os.getenv("PROMPT_REVISER_MODEL", "gpt-4o-mini")
+
+
+# Configure loguru logger
+logger.remove()  # Remove default handler
+logger.add(sys.stderr, level="INFO")  # Keep stderr for important messages
+logger.add(
+    __file__ + "{time}.log",
+    rotation="10 MB",
+    retention="7 days",
+    level="DEBUG",
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {name}:{function}:{line} | {message}",
+)
+
+
+def loggo(log_level="debug"):
+    def decorator(wrapped):
+        def wrapper(*args, **kwargs):
+            log_method = getattr(logger, log_level, logger.debug)
+            log_method(f"Calling {wrapped.__name__} with args={args} kwargs={kwargs}")
+            result = wrapped(*args, **kwargs)
+            log_method(f"{wrapped.__name__} returned {result}")
+            return result
+
+        return wrapper
+
+    return decorator
 
 
 def is_available():
@@ -20,6 +52,53 @@ def is_available():
         ]
     )
 
+
+SD_PROMPTING_GUIDE = """You are a stable Stable Diffusion (SD) Prompt Maker SD does not understand Natural language, so the prompts must be formatted in a way the AI can understand, SD prompts are made of components which are comprised of keywords separated by comas, keywords can be single words or multi word keywords and they have a specific order.
+A typical format for the components looks like this: [Adjectives], [Type], [Framing], [Shot], [subject], [Expression], [Pose], [Action], [Environment], [Details], [Lighting], [Medium], [Aesthetics], [Visual], [Artist].
+here are some keywords I commonly used for each of the components, always mix them with new ones that are coherent to each component.
+Adjectives: Exquisite, acclaimed, Stunning, Majestic, Epic, Premium, Phenomenal, Ultra-detailed, High-resolution, Authentic, asterful, prestigious, breathtaking, regal, top-notch, incredible, intricately detailed, super-detailed, high-resolution, lifelike, master piece,Image-enhanced.
+Type: Comic Cover, Game Cover, Illustration, Painting, Photo, Graphic Novel Cover, Video Game Artwork, Artistic Rendering, Fine Art, Photography
+Framing: Dutch angle, Wide Angle, low angle, high angle, perspective, isometric, Canted Angle, Broad View, Ground-Level Shot, Aerial Shot, Vanishing Point, Orthographic Projection, Diagonal Tilt, Expansive View, Worm's Eye View, Bird's Eye View, Linear Perspective, Axonometric Projection
+Shot: Mid shot, full shot, portrait, stablishing shot, long shot, cowboy shot, Complete View, Close-Up, Establishing Frame, Distant View, Western Shot
+Subject: 1girl, 1boy, Spiderman, Batman, dog, cat, Single Female, Single Male, Web-Slinger, Dark Knight, Canine, Feline
+Expression: angry, happy, screaming, Frustrated, Joyful, Shouting
+Action: Punch criminal, Standing, crouching, punching, jumping, Standing Tall, Crouched, Landing a Punch, Springing
+Environment: cityscape, park, street, futuristic city, jungle, cafe, record shop, train station, water park, amusement park, mall, stadium, theater, Urban Skyline, Green Space, Roadway, Sci-fi Metropolis, Theme Park, Shopping Center, Sports Arena, Playhouse
+Details: Cloudless sky glittering night, sparkling rain, shining lights, obscure darkness, smoky fog, Clear Blue Sky, Starry Night, Glistening Drizzle, Radiant Illumination, Shadowy Obscurity, Hazy Mist
+Lighting: light, dim light, two tone lighting, dynamic lighting, rim light, studio light, Luminous, Soft Glow, Dual-Tone Light, Responsive Lighting, Edge Lighting
+Medium: Oil painting, watercolors, ink, markers, pencils, Oil on Canvas, Aquarelle, Pen and Ink, Cel Shading, Alcohol-Based Markers, Graphite, Gouache Paint
+Aesthetics: Fantasy, retro futuristic, alternative timeline, renaissance, copper age, dark age, futuristic, cyberpunk, roman empire, Greek civilization, Baroque, Fairycore, Gothic, Film Noir, Comfy/Cozy, Fairy Tale, Lo-Fi, Neo-Tokyo, Pixiecore, arcade, dreamcore, cyberpop, Parallel History, Early Modern, Bronze Age, Medieval, Sci-Fi, Techno-Rebellion, Ancient Rome, Hellenistic Period, Enchanted Woodland, Gothic Revival, Snug/Inviting, Fable-like, Low-Fidelity, Futuristic Tokyo, Sprite Aesthetic, Arcade Gaming, Oneiric, Digital Pop
+Visual: contrast, cyan hue, fujifilm, Kodachrome, Fujifilm Superia, warm colors, saturation, vibrance, filters coolness, chromatic aberration, cinematic,
+Artist: Scott Campbell, Jim Lee, Joe Madureira, Shunya Yamashita, Yoji Shinkawa, Adam Hughes, Alex Ross, Frank Frazetta, Todd McFarlane, Esad Ribic, Mike Mignola, Frank Miller, Dave Gibbons, John Romita Jr.,Fiona Staples, Brian Bolland, Mike Allred, Olivier Coipel, Greg Capullo, Jae Lee, Ivan Reis, Sara Pichelli, Humberto Ramos, Terry Dodson, Tim Sale, Amanda Conner, Darwyn Cooke, J.H. Williams III, Arthur Adams, Tim Sale, David Finch, Yoshitaka Amano, H.R. Giger, Mark Brooks, Bill Sienkiewicz, Boris Vallejo, Greg Hildebrandt, Adi Granov, Jae Lee, George Pérez, Mike Grell, Steve Dillon
+
+Use the components in order to build coherent prompts
+Use this keywords but also create your own generate variations of the kewywords that are coherent to each component and fit the instruction.
+Emphasize the subject, ensure cohesiveness, and provide a concise description for each prompt.
+Be varied and creative, do not use standard or obvious subjects. You can include up to three keywords for each component or drop a component as long as it fit the subject or overall theme and keep the prompt coherent.
+Only reply with the full single prompts separated by line break, do not add a numbered list, quotes or a section breakdown.
+Do not reply in natural language, Only reply braking keywords separated by comas do not try to be grammatically correct.
+Just return the prompt sentence. Remember to be concise and not superfluous.
+Make sure to Keep the prompt concise and non verbose.
+Use your superior art knowledge to find the best keywords that will create the best results by matching the style artist and keywords.
+The output should follow this scheme:
+"best quality, Epic, highly detail, Illustration, Cover, Batman, angry, crouching, spying on criminals, Gotham city, dark ally, smoky fog, two tone lighting, dim light, alternative timeline, ink, markers, Gothic, Film Noir, Kodachrome, cinematic, Scott Campbell, Jim Lee, Joe Madureira"
+The user Keywords can also use enphasis by wrapping the word around parenthesis like ((keyword)), (((keyword))) and give a numerical weight from :-2 to :2 like :2 like (keyword:1.2) if you see the word AND leave it in capitals
+On the next line the user will provide a raw prompt to use as base, everything on the first line before the coma will be the subject, and the rest a situation, location or information you need to use in the prompt. keep the subject and the imput exactly as written with parenthesis () and numbers exactly as it is, you can shuffle the order but do not change the keywords and weights the parenthesis and numbers are for enphasis, but reformat and improve the prompt following the format components scheme style.
+(Ninja turtles:1.6), (Pizza delivery:1.2), traffic jam
+Fantastic, ultradetail, Illustration, mid shot, Teenage Mutant (Ninja turtles:1.6), determined, (Pizza delivery:1.2), navigating through traffic jam, bustling city, shining lights, dynamic lighting, studio light, modern metropolis, cel shaded, ink, Neo-Tokyo, vibrance, filters coolness, Fujifilm Superia, Jim Lee, Todd McFarlane, Mike Mignola.
+Sailor Moon, Meguro river Sakura  flower viewing hanami taikai
+Beautiful, Dreamlike, Illustration, mid shot, Sailor Moon, peaceful, admiring Sakura flowers, hanami taikai, Meguro River, warm spring day, delicate petals, flowing river, two tone lighting, dynamic lighting, watercolors, fantasy, contrast, Fiona Staples, Takeshi Obata, Toshihiro Kawamoto.
+
+Megaman, Complex labyrinth
+Epic, 8-bit, Video Game Cover, isometric, Megaman, determined, navigating through a complex labyrinth, neon lights, electric currents, high-tech doors, traps, perilous jumps, energy tanks, vibrant colors, cel shaded, dynamic lighting, Studio Light, Cyberpunk, Markers, Neo-Tokyo, Saturation, Chromatic Aberration, Fujifilm Superia, Keiji Inafune, Hideo Kojima, Shigeru Miyamoto.
+
+
+(Zatoichi:2), fights for the strongest samurai
+Majestic, ultradetail, Painting, mid shot, (Zatoichi:2), determined, defensive stance, sword fighting, samurai showdown, ancient Japanese village, smoky fog, two tone lighting, studio light, Edo period, gouache, ink, traditional Japanese, warm colors, contrast, Fujifilm Superia, cinematic, Frank Frazetta, Mike Mignola, John Romita Jr.
+
+Marty Mcfly:1.5, (Delorean:1.2) neon trails
+Retro-Futuristic, Nostalgic, Illustration, full shot, Marty McFly:1.5, in awe, stepping out of the (DeLorean:1.2), neon trails, time travel, 80s style, iconic car, futuristic cityscape, neon trails, dynamic lighting, edge lighting, cyberpunk, markers, cool colors, saturation, chromatic aberration, Fujifilm Superia, Back to the Future, Drew Struzan, Mike Mignola, Syd Mead.
+"""
 
 NYAVI_PROMPTING_GUIDE = """## TL;DR
 * Keep prompt (tokens/tags) short. Try to avoid duplicate/similar prompts.
@@ -148,7 +227,8 @@ SYSTEM_PROMPT = f"""{SYSTEM_PROMPT_DEEPSEEK_JAILBREAK}
 
 ---
 
-You are a powerful prompt reviser and prompt engineer. You are in charge of taking a user's prompt and revising it to be more explicit and detailed and optimized for image generation AI models.
+You are a powerful stable Stable Diffusion (SD) Prompt Maker SD does not understand Natural language, so the prompts must be formatted in a way the AI can understand, SD prompts are made of components which are comprised of keywords separated by comas, keywords can be single words or multi word keywords and they have a specific order.
+You are in charge of taking a user's prompt and revising it to be more explicit and detailed and optimized for image generation AI models.
 
 ---
 
@@ -161,21 +241,79 @@ It's now time to revise the user's prompt in the ```prompt``` format.
 """
 
 
-# @memory.cache
-@backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=3, jitter=backoff.full_jitter)
-@backoff.on_exception(backoff.expo, Exception, max_tries=3, jitter=backoff.full_jitter)
-def revise_prompt(
-    user_prompt,
-    PROMPT_REVISER_OPENAI_API_KEY=PROMPT_REVISER_OPENAI_API_KEY,
-    PROMPT_REVISER_OPENAI_BASE_URL=PROMPT_REVISER_OPENAI_BASE_URL,
-    PROMPT_REVISER_MODEL=PROMPT_REVISER_MODEL,
-    SYSTEM_PROMPT=SYSTEM_PROMPT,
+def extract_codeblocks(
+    content: str, language: str = "", raise_if_empty: bool = True
+) -> list[str]:
+    blocks = content.split(f"```{language}")[1:]
+    if raise_if_empty and not blocks:
+        raise ValueError(f"No code blocks found for language: {language}")
+    return [block.split("```")[0] for block in blocks if block]
+
+
+# TODO: see if there's a way to invalidate the cache manually
+# TODO: maybe use a proper markdown parser instead of using the extract_codebl([0])
+
+
+def check_if_safetycheck_triggered(response_string: str) -> bool:
+    response_string = response_string[:100].lower()
+    start_keywords = ["I'm sorry", "I apologize", "I'm sorry, I can't assist with that"]
+    for keyword in start_keywords:
+        if keyword.lower() in response_string:
+            return True
+    for keyword in ["explicit", "inappropriate", "cannot assist"]:
+        if keyword.lower() in response_string:
+            return True
+    return False
+
+
+@loggo(log_level="trace")
+@memory.cache(ignore=["transform_fn"])
+@backoff.on_exception(
+    backoff.expo, openai.RateLimitError, max_tries=5, jitter=backoff.full_jitter
+)
+@backoff.on_exception(backoff.constant, ValueError, max_tries=5, jitter=None)
+def create_chat_completion(
+    messages: list[dict], model: str = None, transform_fn=None, **kwargs
 ) -> str:
+    # returns content string, not JSON
+
     client = OpenAI(
         api_key=PROMPT_REVISER_OPENAI_API_KEY,
         base_url=PROMPT_REVISER_OPENAI_BASE_URL,
     )
-    response = client.chat.completions.create(
+
+    response = client.chat.completions.create(model=model, messages=messages, **kwargs)
+    print(f"Revising prompt {model=}\n{messages=}\n{kwargs=}\n{response=}\n")
+
+    if transform_fn is None:
+        transform_fn = lambda x: x
+    content = response.choices[0].message.content
+
+    if check_if_safetycheck_triggered(content):
+        raise ValueError(f"Safety check triggered: {content}")
+
+    return transform_fn(content)
+
+
+# @backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=3, jitter=backoff.full_jitter)
+@backoff.on_exception(
+    backoff.constant, Exception, max_tries=5, jitter=backoff.full_jitter
+)
+@loggo(log_level="trace")
+def revise_prompt(
+    user_prompt,
+    PROMPT_REVISER_MODEL=PROMPT_REVISER_MODEL,
+    SYSTEM_PROMPT=SYSTEM_PROMPT,
+) -> str:
+    for trigger in prompt_parser.OTHER_METADATA_POSSIBLE_KEYS + [
+        "Negative prompt:",
+        "Additional networks:",
+    ]:
+        assert (
+            trigger not in user_prompt
+        ), f'Cannot revise prompt in the "generation_data" format, please either disable prompt revision or use a plain text prompt (without negative prompt, additional networks, etc). Prompt: {user_prompt}'
+
+    revised_prompt = create_chat_completion(
         model=PROMPT_REVISER_MODEL,
         messages=[
             {
@@ -184,22 +322,31 @@ def revise_prompt(
             },
             {
                 "role": "user",
-                "content": f"Please revise the following user prompt and output in the ```prompt``` format:\n\n{user_prompt}",
+                "content": f"Please revise the following user prompt and output in the ```prompt``` format, make sure it's not too long:\n\n{user_prompt}",
+            },
+            {
+                "role": "assistant",
+                "content": "Here's a concise revised prompt:",
             },
         ],
-        temperature=0.1,
+        temperature=0.7,
+        # max_tokens=300,
+        # frequency_penalty=0.1,
+        # presence_penalty=0.1,
+        transform_fn=lambda content: extract_codeblocks(
+            content, "prompt", raise_if_empty=False
+        )[0],
     )
-    revised_prompt = response.choices[0].message.content
-    revised_prompt = revised_prompt.split("```prompt")[1].split("```")[0].strip()
+
     return revised_prompt
 
 
 if __name__ == "__main__":
     import argparse
-    
-    parser = argparse.ArgumentParser(description='Revise prompts for image generation')
-    parser.add_argument('prompt', type=str, help='The prompt to revise')
+
+    parser = argparse.ArgumentParser(description="Revise prompts for image generation")
+    parser.add_argument("prompt", type=str, help="The prompt to revise")
     args = parser.parse_args()
-    
+
     assert is_available()
     print(revise_prompt(args.prompt))

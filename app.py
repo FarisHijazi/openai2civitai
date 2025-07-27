@@ -27,8 +27,8 @@ import sys
 
 import backoff
 import httpx
+import httpcore
 import joblib
-import requests
 from fastapi import FastAPI, Header, HTTPException, status, Request
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 from openai import APIConnectionError, APIError
@@ -76,6 +76,8 @@ POLL_TIMEOUT: float = float(os.getenv("POLL_TIMEOUT", "600"))
 POLL_INTERVAL: float = float(os.getenv("POLL_INTERVAL", "1"))
 
 PROMPT_REVISOR_DISABLED_ERROR_MESSAGE = "<Prompt revisor is disabled, enable it by setting the following environment variables: PROMPT_REVISER_OPENAI_API_KEY=sk-asdfasdf ; PROMPT_REVISER_OPENAI_BASE_URL=https://api.openai.com/v1 ; PROMPT_REVISER_MODEL=gpt-4o-mini >"
+DISABLE_NATIVE_BATCHING = os.getenv("DISABLE_NATIVE_BATCHING", "False").lower() in ["true", "1", "yes", "y"]
+
 
 memory = joblib.Memory(location="./cache", verbose=0)
 
@@ -105,19 +107,36 @@ def loggo(log_level="debug"):
 
     return decorator
 
-
-# PROMPT_REVISION_ENABLED_BY_DEFAULT = os.getenv("PROMPT_REVISION_ENABLED_BY_DEFAULT", "false").lower() in ["true", "1", "yes", "y", "enable", "enabled"]
-
-PROMPT_REVISER_TRIGGER_PREFIX = "REV//"
-PROMPT_REVISER_UNTRIGGER_PREFIX = "NO" + PROMPT_REVISER_TRIGGER_PREFIX
+logger.debug(os.environ)
 
 IMAGE_PROMPT_TEMPLATE = os.getenv("IMAGE_PROMPT_TEMPLATE", "{prompt}") or "{prompt}"
 assert (
     IMAGE_PROMPT_TEMPLATE.count("{prompt}") == 1
 ), "IMAGE_PROMPT_TEMPLATE must contain exactly one {prompt}"
-# assert PROMPT_REVISER_TRIGGER_PREFIX not in IMAGE_PROMPT_TEMPLATE, f"{PROMPT_REVISER_TRIGGER_PREFIX} must not be in IMAGE_PROMPT_TEMPLATE"
-# assert PROMPT_REVISER_UNTRIGGER_PREFIX not in IMAGE_PROMPT_TEMPLATE, f"{PROMPT_REVISER_UNTRIGGER_PREFIX} must not be in IMAGE_PROMPT_TEMPLATE"
 
+DEFAULT_TITLE_GENERATION_PROMPT_TEMPLATE = """### Task:
+Generate a concise, 3-5 word title with an emoji summarizing the content in the content's primary language.
+### Guidelines:
+- The title should clearly represent the main theme or subject of the content.
+- Use emojis that enhance understanding of the topic, but avoid quotation marks or special formatting.
+- Write the title in the content's primary language.
+- Prioritize accuracy over excessive creativity; keep it clear and simple.
+- Your entire response must consist solely of the JSON object, without any introductory or concluding text.
+- The output must be a single, raw JSON object, without any markdown code fences or other encapsulating text.
+- Ensure no conversational text, affirmations, or explanations precede or follow the raw JSON output, as this will cause direct parsing failure.
+### Output:
+JSON format: { "title": "your concise title here" }
+### Examples:
+- { "title": "📉 Stock Market Trends" },
+- { "title": "🍪 Perfect Chocolate Chip Recipe" },
+- { "title": "Evolution of Music Streaming" },
+- { "title": "Remote Work Productivity Tips" },
+- { "title": "Artificial Intelligence in Healthcare" },
+- { "title": "🎮 Video Game Development Insights" }
+### Content:
+<content>
+${content}
+</content>"""
 
 
 class OpenAIImageRequest(BaseModel):
@@ -131,7 +150,7 @@ class OpenAIImageRequest(BaseModel):
         description="Model to use for image generation",
     )
     n: Optional[int] = Field(
-        default=1, ge=1, le=10, description="Number of images to generate"
+        default=1, ge=1, le=100, description="Number of images to generate"
     )
     quality: Optional[Literal["standard", "hd"]] = Field(
         default=None, description="Image quality"
@@ -159,14 +178,6 @@ class OpenAIChatRequest(BaseModel):
     temperature: Optional[float] = 0.7
     stream: Optional[bool] = False
 
-
-# The custom OpenAIImageData and OpenAIImageResponse models are no longer needed,
-# as we now use Image and ImagesResponse from the official openai library.
-# class OpenAIImageData(BaseModel): ...
-# class OpenAIImageResponse(BaseModel): ...
-
-# The OpenAIErrorResponse is not used and can be removed.
-# class OpenAIErrorResponse(BaseModel): ...
 
 
 @asynccontextmanager
@@ -309,6 +320,7 @@ async def health_check() -> dict:
         "status": "healthy",
         "service": "openai-civitai-proxy",
         "prompt_reviser available": prompt_reviser.is_available(),
+        "DISABLE_NATIVE_BATCHING": DISABLE_NATIVE_BATCHING,
     }
 
 
@@ -388,16 +400,6 @@ def translate_openai_to_civitai(request: OpenAIImageRequest, i: int = 0) -> dict
         Dictionary formatted for CivitAI API
     """
 
-    def _assert_no_more_prefixes(string):
-        if PROMPT_REVISER_UNTRIGGER_PREFIX in string:
-            raise ValueError(
-                f'Prompt contains illegal reserved string "{PROMPT_REVISER_UNTRIGGER_PREFIX}", this is reserved for triggering the prompt reviser and can only appear once and at the beginning of the prompt. Prompt: {request.prompt=}'
-            )
-        if PROMPT_REVISER_TRIGGER_PREFIX in string:
-            raise ValueError(
-                f'Prompt contains illegal reserved string "{PROMPT_REVISER_TRIGGER_PREFIX}", this is reserved for triggering the prompt reviser and can only once and appear at the beginning of the prompt. Prompt: \n{request.prompt=}\n{string=}'
-            )
-
     original_is_gen_data = prompt_parser.is_generation_data_format(request.prompt)
 
     if not original_is_gen_data:
@@ -421,9 +423,7 @@ def translate_openai_to_civitai(request: OpenAIImageRequest, i: int = 0) -> dict
     if request.seed:
         generation_input["params"]["seed"] = request.seed
 
-    # if request.n:
-    #     # TODO: test this, we may not need to loop anymore
-    #     generation_input["quantity"] = request.n
+    generation_input["quantity"] = request.n
 
     if request.size and request.size != "auto":
         width, height = request.size.split("x")
@@ -436,99 +436,56 @@ def translate_openai_to_civitai(request: OpenAIImageRequest, i: int = 0) -> dict
     # priority 1: generation data format
     if original_is_gen_data:
         logger.info(f"Prompt is in generation data format, no revision")
-        generation_input["params"]["prompt"] = (
-            generation_input["params"]["prompt"]
-            .replace(PROMPT_REVISER_UNTRIGGER_PREFIX, "")
-            .replace(PROMPT_REVISER_TRIGGER_PREFIX, "")
-            .strip()
-        )
-        _assert_no_more_prefixes(generation_input["params"]["prompt"])
+        generation_input["params"]["prompt"] = generation_input["params"][
+            "prompt"
+        ].strip()
         return generation_input
 
-    # free removal of TRIGGER+UNTRIGGER prefix
-    generation_input["params"]["prompt"] = (
-        generation_input["params"]["prompt"]
-        .strip()
-        .removeprefix(PROMPT_REVISER_TRIGGER_PREFIX + PROMPT_REVISER_UNTRIGGER_PREFIX)
-        .strip()
-    )
+    if original_is_gen_data:
+        generation_input["params"]["revised_prompt"] = PROMPT_REVISOR_DISABLED_ERROR_MESSAGE
+        return generation_input
 
-    if generation_input["params"]["prompt"].startswith(PROMPT_REVISER_TRIGGER_PREFIX):
-        if not prompt_reviser.is_available():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Prompt revision prefix found ({PROMPT_REVISER_TRIGGER_PREFIX}), but prompt reviser is disabled. {PROMPT_REVISOR_DISABLED_ERROR_MESSAGE}",
-            )
-
-        generation_input["params"]["prompt"] = (
-            generation_input["params"]["prompt"]
-            .removeprefix(PROMPT_REVISER_TRIGGER_PREFIX)
-            .strip()
-        )
-        _assert_no_more_prefixes(generation_input["params"]["prompt"])
-
-        logger.info(f"Prompt revision triggered by user")
-
-        if not prompt_reviser.is_available():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=PROMPT_REVISOR_DISABLED_ERROR_MESSAGE,
-            )
-
+    if prompt_reviser.is_available():
         # it's ok to mess with the prompt now that we're revising it anyway, RNG is already destroyed
         generation_input["params"]["prompt"] = (
             generation_input["params"]["prompt"].replace("\n", " ").replace("  ", " ")
             + " " * i
         )
         # WARNING: this function takes a long time
-        revised_prompt = prompt_reviser.revise_prompt(
-            generation_input["params"]["prompt"]
+        revised_prompt = (
+            prompt_reviser.revise_prompt(generation_input["params"]["prompt"])
+            .replace("\n", " ")
+            .replace("  ", " ")
+            .strip()
         )
-        generation_input["params"]["revised_prompt"] = (
-            revised_prompt.replace("\n", " ").replace("  ", " ").strip()
-        )
+
+        generation_input["params"]["revised_prompt"] = revised_prompt
         logger.info(
-            f"Revised prompt \"{generation_input['params']['prompt']}\" -> \"{generation_input['params']['revised_prompt']}\""
+            f"Revised prompt from:\"{generation_input['params']['prompt']}\" -> to:\"{generation_input['params']['revised_prompt']}\""
         )
-        generation_input["params"]["prompt"] = generation_input["params"][
-            "revised_prompt"
-        ].strip()
-        return generation_input
-    else:
-        # raise ValueError(f"Prompt revision prefix not found ({PROMPT_REVISER_TRIGGER_PREFIX}), but prompt reviser is enabled. {PROMPT_REVISOR_DISABLED_ERROR_MESSAGE}")
-        logger.info(
-            f"Prompt revision prefix not found ({PROMPT_REVISER_TRIGGER_PREFIX}), but prompt reviser is enabled. {PROMPT_REVISOR_DISABLED_ERROR_MESSAGE}"
-        )
-        _assert_no_more_prefixes(generation_input["params"]["prompt"])
-        generation_input["params"]["prompt"] = generation_input["params"][
-            "prompt"
-        ].strip()
-        return generation_input
+        generation_input["params"]["prompt"] = generation_input["params"]["revised_prompt"]
 
-    # _assert_no_more_prefixes(generation_input["params"]["prompt"])
-    # logger.info(f"Prompt after removing prefixes: {generation_input['params']['prompt']}")
+    # Map quality to CivitAI parameters
+    if request.quality:
+        # Higher quality = more steps and lower CFG scale for better results
+        if request.quality == "hd":
+            generation_input["params"]["cfgScale"] = 4.0
+            generation_input["params"]["steps"] = 30
+        else:  # "standard"
+            generation_input["params"]["cfgScale"] = 7.0
+            generation_input["params"]["steps"] = 20
 
-    # # Map quality to CivitAI parameters
-    # if request.quality:
-    #     # Higher quality = more steps and lower CFG scale for better results
-    #     if request.quality == "hd":
-    #         generation_input["params"]["cfgScale"] = 4.0
-    #         generation_input["params"]["steps"] = 30
-    #     else:  # "standard"
-    #         generation_input["params"]["cfgScale"] = 7.0
-    #         generation_input["params"]["steps"] = 20
-
-    # # Use the configured default CivitAI model
-    # if request.style:
-    #     # Adjust negative prompt based on style
-    #     if request.style == "natural":
-    #         generation_input["params"][
-    #             "prompt"
-    #         ] += ", natural lighting, soft colors, realistic style, subtle details"
-    #     else:  # "vivid"
-    #         generation_input["params"][
-    #             "prompt"
-    #         ] += ", vibrant colors, high contrast, dramatic lighting, bold details, saturated"
+    # Use the configured default CivitAI model
+    if request.style:
+        # Adjust negative prompt based on style
+        if request.style == "natural":
+            generation_input["params"][
+                "prompt"
+            ] += ", natural lighting, soft colors, realistic style, subtle details"
+        else:  # "vivid"
+            generation_input["params"][
+                "prompt"
+            ] += ", vibrant colors, high contrast, dramatic lighting, bold details, saturated"
 
     return generation_input
 
@@ -551,57 +508,50 @@ async def translate_civitai_to_openai(
         ValueError: If response format is invalid
     """
     try:
-        job = civitai_response["jobs"][0]
 
-        if not job.get("result") or len(job["result"]) == 0:
+        results = [
+            result for job in civitai_response["jobs"] for result in job["result"] if result.get("available")
+        ]
+        if not results:
             raise ValueError("No results found in CivitAI response")
 
-        result = job["result"][0]
-
-        if not result.get("available"):
-            raise ValueError("Generated image is not available")
-
         # Get the image URL
-        image_url = result.get("blobUrl")
-        if not image_url:
-            raise ValueError("No image URL found in result")
+        assert all([result.get("blobUrl") for result in results]), "No image URL found in result"
 
-        # Create image data based on requested format
-        image_url_for_response = None
-        b64_json_for_response = None
+        image_urls = [result.get("blobUrl") for result in results]
 
-        if request.response_format == "url":
-            image_url_for_response = image_url
-        elif request.response_format == "b64_json":
-            try:
+        image_data_list = []
+        for image_url in image_urls:
+            # Create image data based on requested format
+            b64_json_for_response = None
+
+            if request.response_format == "url":
+                image_url_for_response = image_url
+            elif request.response_format == "b64_json":
                 b64_json_for_response = await fetch_image_as_base64(image_url)
                 image_url_for_response = (
                     "data:image/png;base64," + b64_json_for_response
                 )
-            except HTTPException:
-                raise  # Re-raise to be caught by the main handler\
 
-        if civitai_input["params"].get("revised_prompt"):
-            prompt_revision_message = civitai_input["params"]["revised_prompt"]
-        elif not prompt_reviser.is_available():
-            prompt_revision_message = PROMPT_REVISOR_DISABLED_ERROR_MESSAGE.strip()
-        elif prompt_parser.is_generation_data_format(request.prompt):
-            prompt_revision_message = f"<prompt not revised because it is in generation data format (without negative prompt, additional networks, etc)>"
-        elif PROMPT_REVISER_UNTRIGGER_PREFIX in request.prompt:
-            prompt_revision_message = f"<prompt not revised, because it was prefixed with {PROMPT_REVISER_UNTRIGGER_PREFIX}>"
-        else:
-            raise ValueError(
-                f"Prompt revision message not found for prompts: {request.prompt=}, {prompt_reviser.is_available()=}, {prompt_parser.is_generation_data_format(request.prompt)=}, {civitai_input['params']['revised_prompt']=}, {civitai_input['params']['prompt']=}"
-            )
+            if civitai_input["params"].get("revised_prompt"):
+                prompt_revision_message = civitai_input["params"]["revised_prompt"]
+            elif not prompt_reviser.is_available():
+                prompt_revision_message = PROMPT_REVISOR_DISABLED_ERROR_MESSAGE
+            elif prompt_parser.is_generation_data_format(request.prompt):
+                prompt_revision_message = f'<prompt not revised because it is in generation data format (with "Negative prompt:", "Additional networks:", etc)>'
+            else:
+                raise ValueError(
+                    f"Prompt revision message not found for prompts: {request.prompt=}, {prompt_reviser.is_available()=}, {prompt_parser.is_generation_data_format(request.prompt)=}, {civitai_input['params']['revised_prompt']=}, {civitai_input['params']['prompt']=}"
+                )
 
-        image_data = Image(
-            url=image_url_for_response,
-            b64_json=b64_json_for_response,
-            revised_prompt=prompt_revision_message,
-        )
+            image_data_list.append(Image(
+                url=image_url_for_response,
+                b64_json=b64_json_for_response,
+                revised_prompt=prompt_revision_message,
+            ))
 
         # Use job creation time if available, otherwise current time
-        created_time = job.get("createdAt", int(time.time()))
+        created_time = civitai_response["jobs"][0].get("createdAt", int(time.time()))
         if isinstance(created_time, str):
             # If timestamp is a string, try to parse it
             import datetime
@@ -614,7 +564,7 @@ async def translate_civitai_to_openai(
             except:
                 created_time = int(time.time())
 
-        return ImagesResponse(created=created_time, data=[image_data])
+        return ImagesResponse(created=created_time, data=image_data_list)
 
     except KeyError as e:
         raise ValueError(f"Missing required field in CivitAI response: {e}")
@@ -670,36 +620,35 @@ async def poll_civitai_job(token: str, job_id: str) -> dict:
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
 
-            job = response["jobs"][0]
-            job_status = job.get("status", "unknown")
+
+            job_statuses = [job.get("status", "unknown") for job in response["jobs"]]
 
             elapsed_time = time.time() - start_time
             logger.info(
-                f"📊 Attempt {attempt} ({elapsed_time:.1f}s elapsed): Job status = {job_status}"
+                f"📊 Attempt {attempt} ({elapsed_time:.1f}s elapsed): Job status = {job_statuses}"
             )
 
             # Check if job failed
-            if job_status in ["Failed", "Cancelled"]:
-                error_msg = job.get(
-                    "error", "Job failed without specific error message"
+            for job, job_status in zip(response["jobs"], job_statuses):
+                if job_status in ["Failed", "Cancelled"]:
+                    error_msg = job.get(
+                        "error", "Job failed without specific error message"
                 )
-                logger.error(f"❌ Job failed with status {job_status}: {error_msg}")
-                raise HTTPException(
-                    status_code=500, detail=f"CivitAI job failed: {error_msg}"
-                )
+                    logger.error(f"❌ Job failed with status {job_status}: {error_msg}")
+                    raise HTTPException(
+                        status_code=500, detail=f"CivitAI job failed: {error_msg}"
+                    )
 
             # Check if job is complete
-            if job.get("result") and len(job["result"]) > 0:
-                result = job["result"][0]
-                if result.get("available"):
-                    logger.info(
-                        f"✅ Job completed successfully after {attempt} attempts ({elapsed_time:.1f}s)"
-                    )
-                    return response
-                # else:
-                #     logger.debug(
-                #         f"⏳ Job has result but image not yet available (attempt {attempt})"
-                #     )
+            if (
+                job.get("result")
+                and len(job["result"]) > 0
+                and all([result.get("available") for result in job["result"]])
+            ):
+                logger.info(
+                    f"✅ Job completed successfully after {attempt} attempts ({elapsed_time:.1f}s)"
+                )
+                return response
             else:
                 logger.info(
                     f"⏳ Job still processing (attempt {attempt}), time elapsed: {elapsed_time:.1f}s/{POLL_TIMEOUT}s"
@@ -724,22 +673,31 @@ async def poll_civitai_job(token: str, job_id: str) -> dict:
 
 # @memory.cache
 @backoff.on_exception(
-    backoff.expo,
+    backoff.expo, 
     (
+        # httpx timeout exceptions
         httpx.TimeoutException,
         httpx.ReadTimeout,
         httpx.WriteTimeout,
         httpx.ConnectTimeout,
         httpx.PoolTimeout,
+        # httpcore timeout exceptions (underlying layer)
+        httpcore.TimeoutException,
+        httpcore.ReadTimeout,
+        httpcore.WriteTimeout,
+        httpcore.ConnectTimeout,
+        httpcore.PoolTimeout,
+        # General exceptions
         Exception,
         HTTPException,
     ),
-    max_tries=10,
+    max_tries=10, 
     jitter=backoff.full_jitter,
+    on_backoff=lambda details: logger.warning(f"🔄 Retrying civitai_image_create after {details['exception'].__class__.__name__}: {details['exception']} (attempt {details['tries']}/{10})"),
 )
 @loggo("trace")
 async def civitai_image_create(civitai_input: dict, wait: bool = False):
-    logger.info(f"🔄 Submitting CivitAI image creation request: {civitai_input=}")
+    # logger.info(f"🔄 Submitting CivitAI image creation request: {civitai_input=}")
     return await asyncio.to_thread(civitai.image.create, civitai_input, wait=wait)
 
 
@@ -792,15 +750,24 @@ async def create_image(
 
         # Step 1: Translate OpenAI requests to Civitai inputs in parallel threads.
         # This is important because prompt revision can be slow.
-        translate_tasks = [
-            loop.run_in_executor(None, translate_openai_to_civitai, request, i)
-            for i in range(request.n or 1)
-        ]
+
+        quantity = request.n or 1
+        assert quantity > 0, "Quantity must be greater than 0"
+        request.n = quantity
+        if DISABLE_NATIVE_BATCHING:
+            request.n = 1
+            translate_tasks = [
+                loop.run_in_executor(None, translate_openai_to_civitai, copy.deepcopy(request), i)
+                for i in range(quantity)
+            ]
+            request.n = quantity
+        else:
+            translate_tasks = [loop.run_in_executor(None, translate_openai_to_civitai, copy.deepcopy(request), 0)]
         civitai_inputs = await asyncio.gather(*translate_tasks)
 
         # Step 2: Create image generation jobs on Civitai in parallel.
         create_tasks = [
-            civitai_image_create(civitai_input) for civitai_input in civitai_inputs
+            civitai_image_create(civitai_input, wait=False) for civitai_input in civitai_inputs
         ]
         civitai_responses = await asyncio.gather(*create_tasks)
 
@@ -808,15 +775,12 @@ async def create_image(
         polling_tasks = []
         for res in civitai_responses:
             if res and res.get("token") and res.get("jobs"):
-                polling_tasks.append(
-                    poll_civitai_job(res["token"], res["jobs"][0]["jobId"])
-                )
+                polling_tasks += [
+                    poll_civitai_job(res["token"], job["jobId"])
+                    for job in res["jobs"]
+                ]
 
         final_responses = await asyncio.gather(*polling_tasks)
-
-        # revised_prompts = [
-        #     civitai_input["params"]["prompt"] for civitai_input in civitai_inputs
-        # ]
 
         # Step 4: Translate Civitai responses to OpenAI format in parallel.
         translation_tasks = [
@@ -830,12 +794,8 @@ async def create_image(
             data for res in openai_responses for data in res.data
         ]
 
-        # Take the creation time from the first response, if available.
-        created_time = (
-            openai_responses[0].created if openai_responses else int(time.time())
-        )
 
-        return ImagesResponse(created=created_time, data=all_image_data)
+        return ImagesResponse(created=openai_responses[0].created, data=all_image_data)
 
     except HTTPException as e:
         logger.error(f"HTTPException: {str(e)}")
@@ -918,8 +878,20 @@ async def main():
     # client = OpenAI(api_key='sk-asdfasdf')
     # client.images.generate
     request = OpenAIImageRequest(
-        prompt="An astronaut riding a horse",
-        n=2,
+        prompt="Tiny tinkerbell held in one hand by a giant gargantuan monster, and fucked and impaled by his huge monster's cock. The monster's hand wraps around her arms and waist.",
+        #         prompt="""((Miniature)), Tinkerbell from Peter Pan, toy-sized fairy, 1guy, (1girl:perfect face, cute, small breasts, long brown hair, petite), forest, (massive size difference:1.8), (taking giant penis:1.6), nude, penetration, ((pussy stretch:1.7)), crying orgasm, big clear eyes, (shocked face:1.4), (held by giant hand:1.5), trying to escape, monster cock, (full monster view), score_9_up, rating_explicit, masterpiece, best quality, highly detailed, realistic, close-up, side-view, perfect hands
+        # Negative prompt: easynegative, badhandv4, (worst quality, low quality, normal quality), bad-artist, blurry, ugly, ((bad anatomy)),((bad hands)),((bad proportions)),((duplicate limbs)),((fused limbs)),((interlocking fingers)),((poorly drawn face)), signature, watermark, artist logo, patreon logo
+        # Steps: 25, CFG scale: 4, Sampler: Euler a, Seed: 1594260453, process: txt2img, workflow: txt2img, Size: 1024x1024, draft: false, width: 1024, height: 1024, quantity: 1, baseModel: Illustrious, disablePoi: true, aspectRatio: 1:1, Created Date: 2025-07-05T1255:24.7399976Z, experimental: false, Clip skip: 2, Model: urn:air:sdxl:checkpoint:civitai:257749@290640""",
+        #         prompt="""score_9,score_8_up,score_7_up,
+        # 1 tanned curvy italian girl, hot girl, round face, thin nose, long hair, hair in pigtails , brown hair, (oversized huge breasts), sexy face, narrow face, makeup,
+        # Cute pajamas top , pajamas top
+        # pulled over midriff , lifting shirt, pierced belly button , close up view, on knees, knees spread wide, all fours, ass up, round ass,
+        # In bedroom, frat house BREAK on bed,
+        # By night, pajamas down, anus, pussy, (puffy labia:1.4), beautiful woman, intimate photo, realistic image, dim light, cozy atmosphere, perfect lighting, perfect shadows, shiny skin, perfect reflections, lots of shadows
+        # Negative prompt: easynegative, badhandv4, (worst quality, low quality, normal quality), bad-artist, blurry, ugly, ((bad anatomy)),((bad hands)),((bad proportions)),((duplicate limbs)),((fused limbs)),((interlocking fingers)),((poorly drawn face)), signature, watermark, artist logo, patreon logo
+        # Additional networks: urn:air:sd1:embedding:civitai:7808@9208*1.0!easynegative, urn:air:sdxl:lora:civitai:1115064@1253021*3.3, urn:air:sdxl:lora:civitai:212532@239420*1.0, urn:air:sdxl:lora:civitai:341353@382152*0.8, urn:air:sdxl:lora:civitai:888231@398847*0.45, urn:air:sdxl:lora:civitai:300005@436219*0.25
+        # Steps: 25, CFG scale: 4, Sampler: Euler a, Seed: 1594260453, process: txt2img, workflow: txt2img, Size: 1024x1024, draft: false, width: 1024, height: 1024, quantity: 1, baseModel: Illustrious, disablePoi: true, aspectRatio: 1:1, Created Date: 2025-07-05T1255:24.7399976Z, experimental: false, Clip skip: 2, Model: urn:air:sdxl:checkpoint:civitai:257749@290640""",
+        n=10,
         response_format="b64_json",
         # seed=12345,
         # size="1024x1024",

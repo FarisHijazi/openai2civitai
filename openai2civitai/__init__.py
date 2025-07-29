@@ -20,7 +20,8 @@ from .server import (
     translate_openai_to_civitai,
     translate_civitai_to_openai,
     fetch_image_as_base64,
-    main
+    main,
+    civitai
 )
 from openai.types import ImagesResponse
 
@@ -38,6 +39,7 @@ __all__ = [
     'translate_openai_to_civitai',
     'translate_civitai_to_openai',
     'fetch_image_as_base64',
-    'main'
+    'main',
+    'civitai'
 ]
 

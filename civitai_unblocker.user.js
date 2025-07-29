@@ -13,7 +13,7 @@
 
 (function() {
     'use strict';
-    const CIVITAI_API_TOKEN = '215a59cb2e5f83a3c9db41f19acb3c13'
+    const CIVITAI_API_TOKEN = 'API_KEY_HERE'
 
     // =========================================================================
     // HOW TO CONFIGURE: Find the Job ID

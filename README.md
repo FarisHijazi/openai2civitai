@@ -18,9 +18,9 @@ To adapt your existing OpenAI-based application, you only need to change the cli
 +)
 ```
 
-## Setup and Usage
+# Setup and Usage
 
-### 1. Configure Environment
+## 1. Configure Environment
 Create a `.env` file or export the following environment variables:
 
 ```bash
@@ -32,13 +32,13 @@ export HOST="0.0.0.0"
 export PORT="8000"
 ```
 
-### 2. Run with Docker
+## 2. Run with `pip`
 
-```bash
-docker compose up --build
+```
+pip install git+https://github.com/FarisHijazi/openai2civitai.git
 ```
 
-### 3. Test with cURL
+## 3. Test with cURL
 Open a new terminal and send a test request:
 
 ```bash
@@ -50,7 +50,6 @@ curl -X POST "http://localhost:8000/v1/images/generations" \
     "size": "1024x1024"
   }'
 ```
-
 
 ## Configuration
 
@@ -68,7 +67,6 @@ The proxy is configured via environment variables:
 ## Limitations
 
 - Supports only image generation (`/v1/images/generations`).
-- Generates one image at a time (`n=1`).
 - The `quality` and `style` parameters are ignored.
 
 ## Health Check
@@ -95,3 +93,7 @@ python test_proxy.py
 - `debug_civitai.py` - Script for testing the direct CivitAI API connection.
 - `example_civitai_api_call.py` - An example of a direct call to the CivitAI API.
 - `requirements.txt` - Required Python packages.
+
+## TODOs
+
+- [ ] create test suite, for openai SDK, and for jailbreak

@@ -1,0 +1,3 @@
+streamlit
+civitai-py
+httpx = ">=0.23.3"

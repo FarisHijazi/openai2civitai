@@ -44,7 +44,7 @@ import prompt_reviser
 logger.remove()  # Remove default handler
 logger.add(sys.stderr, level="INFO")  # Keep stderr for important messages
 logger.add(
-    __file__ + "{time}.log",
+    __file__ + ".log",
     rotation="10 MB",
     retention="7 days",
     level="DEBUG",

@@ -59,7 +59,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 
 # import civitai_python.civitai as civitai
-import civitai_sitepackages.civitai as civitai
+import civitai as civitai
 import prompt_reviser
 from loguru import logger
 
@@ -86,7 +86,7 @@ memory = joblib.Memory(location="./cache", verbose=0)
 logger.remove()  # Remove default handler
 logger.add(sys.stderr, level="INFO")  # Keep stderr for important messages
 logger.add(
-    __file__ + "{time}.log",
+    __file__ + ".log",
     rotation="10 MB",
     retention="7 days",
     level="DEBUG",

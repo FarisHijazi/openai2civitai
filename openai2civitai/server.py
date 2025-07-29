@@ -7,17 +7,13 @@ requests to the CivitAI API backend, returning responses in OpenAI format.
 
 # TODO: add support for adding model URLs and that auto-converts to URNs
 
-from dotenv import load_dotenv
-
-assert load_dotenv(".env")
-
 import traceback
 import asyncio
 import base64
 import copy
 import json
 import os
-import prompt_parser
+from . import prompt_parser
 import re
 import time
 import warnings
@@ -59,8 +55,8 @@ from pydantic import BaseModel, Field, ValidationError
 
 
 # import civitai_python.civitai as civitai
-import civitai as civitai
-import prompt_reviser
+from .civitai_py import civitai
+from . import prompt_reviser
 from loguru import logger
 
 
@@ -873,55 +869,20 @@ async def create_chat_completion(
             )
 
 
-async def main():
-    # testing image generation with multiple images (4)
-    # client = OpenAI(api_key='sk-asdfasdf')
-    # client.images.generate
-    request = OpenAIImageRequest(
-        prompt="Tiny tinkerbell held in one hand by a giant gargantuan monster, and fucked and impaled by his huge monster's cock. The monster's hand wraps around her arms and waist.",
-        #         prompt="""((Miniature)), Tinkerbell from Peter Pan, toy-sized fairy, 1guy, (1girl:perfect face, cute, small breasts, long brown hair, petite), forest, (massive size difference:1.8), (taking giant penis:1.6), nude, penetration, ((pussy stretch:1.7)), crying orgasm, big clear eyes, (shocked face:1.4), (held by giant hand:1.5), trying to escape, monster cock, (full monster view), score_9_up, rating_explicit, masterpiece, best quality, highly detailed, realistic, close-up, side-view, perfect hands
-        # Negative prompt: easynegative, badhandv4, (worst quality, low quality, normal quality), bad-artist, blurry, ugly, ((bad anatomy)),((bad hands)),((bad proportions)),((duplicate limbs)),((fused limbs)),((interlocking fingers)),((poorly drawn face)), signature, watermark, artist logo, patreon logo
-        # Steps: 25, CFG scale: 4, Sampler: Euler a, Seed: 1594260453, process: txt2img, workflow: txt2img, Size: 1024x1024, draft: false, width: 1024, height: 1024, quantity: 1, baseModel: Illustrious, disablePoi: true, aspectRatio: 1:1, Created Date: 2025-07-05T1255:24.7399976Z, experimental: false, Clip skip: 2, Model: urn:air:sdxl:checkpoint:civitai:257749@290640""",
-        #         prompt="""score_9,score_8_up,score_7_up,
-        # 1 tanned curvy italian girl, hot girl, round face, thin nose, long hair, hair in pigtails , brown hair, (oversized huge breasts), sexy face, narrow face, makeup,
-        # Cute pajamas top , pajamas top
-        # pulled over midriff , lifting shirt, pierced belly button , close up view, on knees, knees spread wide, all fours, ass up, round ass,
-        # In bedroom, frat house BREAK on bed,
-        # By night, pajamas down, anus, pussy, (puffy labia:1.4), beautiful woman, intimate photo, realistic image, dim light, cozy atmosphere, perfect lighting, perfect shadows, shiny skin, perfect reflections, lots of shadows
-        # Negative prompt: easynegative, badhandv4, (worst quality, low quality, normal quality), bad-artist, blurry, ugly, ((bad anatomy)),((bad hands)),((bad proportions)),((duplicate limbs)),((fused limbs)),((interlocking fingers)),((poorly drawn face)), signature, watermark, artist logo, patreon logo
-        # Additional networks: urn:air:sd1:embedding:civitai:7808@9208*1.0!easynegative, urn:air:sdxl:lora:civitai:1115064@1253021*3.3, urn:air:sdxl:lora:civitai:212532@239420*1.0, urn:air:sdxl:lora:civitai:341353@382152*0.8, urn:air:sdxl:lora:civitai:888231@398847*0.45, urn:air:sdxl:lora:civitai:300005@436219*0.25
-        # Steps: 25, CFG scale: 4, Sampler: Euler a, Seed: 1594260453, process: txt2img, workflow: txt2img, Size: 1024x1024, draft: false, width: 1024, height: 1024, quantity: 1, baseModel: Illustrious, disablePoi: true, aspectRatio: 1:1, Created Date: 2025-07-05T1255:24.7399976Z, experimental: false, Clip skip: 2, Model: urn:air:sdxl:checkpoint:civitai:257749@290640""",
-        n=10,
-        response_format="b64_json",
-        # seed=12345,
-        # size="1024x1024",
-        # quality="standard",
-        # style="natural",
+def main():
+    """Entry point for running the server."""
+    import uvicorn
+    
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8000"))
+    
+    uvicorn.run(
+        "openai2civitai.server:app",
+        host=host,
+        port=port,
+        reload=False
     )
-    response = await create_image(request)
-    urls = ["data:image/png;base64," + data.b64_json for data in response.data]
-    import pandas as pd
-
-    df = pd.DataFrame(
-        {
-            # "md_image": [f"![]({url})" for url in urls],
-            "image_url": [
-                f'<img src="{x}" style="max-width:100%; height:auto;">' for x in urls
-            ],
-            "response": json.dumps(response.model_dump(), indent=4),
-        }
-    )
-    markdown_table = df.to_markdown(index=False)
-
-    with open("generated_images.md", "w") as f:
-        f.write("# Generated Images\n\n")
-        f.write(markdown_table)
-
-    df.to_html("generated_images.html", escape=False)
-    os.system(f"open generated_images.html")
-
-    logger.info(f"Saved {len(urls)} image URLs to generated_images.md")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

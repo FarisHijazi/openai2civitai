@@ -1,0 +1,13 @@
+include README.md
+include requirements.txt
+include .env.example
+include docker-compose.yml
+include Dockerfile
+include generation_data_spec.md
+recursive-include openai2civitai_proxy *.py
+recursive-include assets *
+global-exclude *.pyc
+global-exclude __pycache__
+global-exclude .DS_Store
+global-exclude *.log
+global-exclude cache/*

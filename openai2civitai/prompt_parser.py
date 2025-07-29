@@ -38,7 +38,7 @@ from loguru import logger
 import sys
 
 # import civitai_python.civitai as civitai
-import prompt_reviser
+from . import prompt_reviser
 
 # Configure loguru logger
 logger.remove()  # Remove default handler

@@ -5,7 +5,7 @@ import openai
 from joblib import Memory
 from loguru import logger
 from openai import OpenAI
-import prompt_parser
+from . import prompt_parser
 import sys
 
 memory = Memory(location="./cache", verbose=0)

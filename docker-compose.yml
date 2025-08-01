@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  proxy:
+    build: .
+    container_name: openai2civitai-proxy
+    # Create a .env file from .env.example and fill in your details.
+    env_file:
+      - .env.example
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./cache:/app/cache
+      # Logs are sent to stdout and can be viewed with 'docker logs openai2civitai-proxy'.
+      # File logs are stored inside the container. If you need to persist them,
+      # you would need to modify server.py to log to a mounted volume. 
